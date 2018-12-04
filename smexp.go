@@ -7,11 +7,14 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-	"github.com/jessevdk/go-flags"
-	"gopkg.in/yaml.v2"
+	flags "github.com/jessevdk/go-flags"
+	yaml "gopkg.in/yaml.v2"
 )
 
 var (
@@ -102,12 +105,7 @@ func main() {
 }
 
 func retrieveSecret(name string) []byte {
-	cfg, err := external.LoadDefaultAWSConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "aws: failed to load config, %v\n", err)
-		os.Exit(EXCONFIG)
-	}
-
+	cfg := loadAWSConfig()
 	smc := secretsmanager.New(cfg)
 	input := &secretsmanager.GetSecretValueInput{
 		SecretId: &name,
@@ -122,6 +120,39 @@ func retrieveSecret(name string) []byte {
 	}
 
 	return []byte(*result.SecretString)
+}
+
+func loadAWSConfig() aws.Config {
+	cfg, err := external.LoadDefaultAWSConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aws: failed to load config, %v\n", err)
+		os.Exit(EXCONFIG)
+	}
+
+	if cfg.Region == "" {
+		// try to get region from ec2 instance metadata
+		metadata := ec2metadata.New(cfg)
+
+		region := make(chan string, 1)
+		go func() {
+			r, err := metadata.Region()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "aws: failed to load region from instance metadata, %v\n", err)
+				os.Exit(EXCONFIG)
+			}
+			region <- r
+		}()
+
+		select {
+		case res := <-region:
+			cfg.Region = res
+		case <-time.After(5 * time.Second):
+			fmt.Fprintf(os.Stderr, "aws: region not found\n")
+			os.Exit(EXCONFIG)
+		}
+	}
+
+	return cfg
 }
 
 func writeFile(name string, data []byte) {
